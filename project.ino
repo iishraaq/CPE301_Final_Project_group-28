@@ -1,14 +1,14 @@
-// Group#28 - Fully compliant version
+
 // Members: Ishraqul Islam, Peter Pickard
 
-// Only explicitly allowed libraries
+
 #include <LiquidCrystal.h>  // Allowed for LCD
 #include <dht.h>            // Allowed for DHT11
 #include <DS1307RTC.h>      // Allowed for RTC
 #include <Stepper.h>        // Allowed for stepper motor
 #include <TimeLib.h>        // Required for RTC
 
-// --- Pin Definitions ---
+      // Pin Definitions
 #define GREEN_LED 13    // PB7
 #define YELLOW_LED 12   // PB6
 #define RED_LED 11      // PB5
@@ -22,7 +22,7 @@
 #define DHT_PIN 22
 #define WATER_LEVEL_PIN A0
 
-// LCD Pins (using allowed library)
+// LCD Pins
 #define RS_PIN 4
 #define EN_PIN 5
 #define D4_PIN 6
@@ -44,7 +44,7 @@ float humidityValue = 0.0;
 int waterSensorReading = 0;
 unsigned long previousDisplayUpdate = 0;
 
-// Using enum instead of String for state (more efficient)
+// Using enum for system state 
 enum SystemState { DISABLED, IDLE, ERROR, RUNNING };
 SystemState systemState = DISABLED;
 
@@ -74,7 +74,7 @@ void loop() {
 // ========================
 
 void setupHardware() {
-  // LCD Setup (using allowed library)
+  // LCD Setup
   lcd.begin(16, 2);
   lcd.print("System Booting");
   
@@ -110,7 +110,7 @@ void setupHardware() {
 // ========================
 
 void readSensors() {
-  // Read DHT11 (using allowed library)
+  // Read DHT11 
   DHT.read11(DHT_PIN);
   tempValue = DHT.temperature;
   humidityValue = DHT.humidity;
