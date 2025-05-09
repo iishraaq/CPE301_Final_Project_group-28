@@ -1,10 +1,10 @@
-# CPE 301 Final Project - Evaporative Cooling System
+# CPE 301 Final Project - Swamp Cooling System
 
 **Group 28**  
 **Professor Bashira Akter Anima**  
 **University of Nevada, Reno - Spring 2025**
 
-## 👥 Team Members
+## Team Members
 Ishraqul Islam
 Peter Pickard
 
