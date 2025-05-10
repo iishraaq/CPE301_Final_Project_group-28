@@ -1,208 +1,411 @@
-// CPE 301 Final Project - COMPLIANT VERSION
-// Team Members: Ishraqul Islam, Peter Pickard
-
+/----Libraries----
 #include <LiquidCrystal.h>
 #include <dht.h>
+#include <Stepper.h>
 #include <Wire.h>
 #include <TimeLib.h>
 #include <DS1307RTC.h>
-#include <Stepper.h>
 
-// ---- Pin Setup ----
-#define DHT11_PIN 40
-#define RS 41
-#define EN 42
-#define D4 43
-#define D5 44
-#define D6 45
-#define D7 46
+//----My Pins----
+// --Outputs--
+//  -LEDS-
+//Green LED (Digital Pin 13, PB7)
+//Yellow LED (Digital Pin 12, PB6)
+//Red LED (Digital Pin 11, PB5)
+//Blue LED (Digital Pin 10, PB4)
+volatile unsigned char* port_b = (unsigned char*) 0x25; 
+volatile unsigned char* ddr_b  = (unsigned char*) 0x24; 
+volatile unsigned char* pin_b  = (unsigned char*) 0x23; 
 
-// LED, Fan, Button, Motor and ADC Setup
-volatile unsigned char* port_b = (unsigned char*) 0x25; // PORTB - LEDs
-volatile unsigned char* ddr_b  = (unsigned char*) 0x24;
-volatile unsigned char* port_l = (unsigned char*) 0x10B; // PORTL - Fan & Buttons
-volatile unsigned char* ddr_l  = (unsigned char*) 0x10A;
+//  -Motors- 
+
+//Stepper (Digital pins 47, 49, 51, 53)
+const int stepsPerRevolution = 2038;
+Stepper vent = Stepper(stepsPerRevolution, 47, 49, 51, 53);
+int ventCurrentPosition;
+
+//Fan (Digital Pin 43, PL6)
+volatile unsigned char* port_l = (unsigned char*) 0x10B; 
+volatile unsigned char* ddr_l  = (unsigned char*) 0x10A; 
 volatile unsigned char* pin_l  = (unsigned char*) 0x109;
-volatile unsigned char* port_e = (unsigned char*) 0x2E; // PORTE - Stop/Reset
-volatile unsigned char* ddr_e  = (unsigned char*) 0x2D;
-volatile unsigned char* pin_e  = (unsigned char*) 0x2C;
-volatile unsigned char* port_d = (unsigned char*) 0x2B; // PORTD - Start
-volatile unsigned char* ddr_d  = (unsigned char*) 0x2A;
+
+// --Inputs--
+
+//Reset (Digital pin 2, PE4)
+//Stop (Digital pin 3, PE5)
+volatile unsigned char* port_e = (unsigned char*) 0x2E; 
+volatile unsigned char* ddr_e  = (unsigned char*) 0x2D; 
+volatile unsigned char* pin_e  = (unsigned char*) 0x2C; 
+
+//Start (Digital pin 18, PD3)
+volatile unsigned char* port_d = (unsigned char*) 0x2B; 
+volatile unsigned char* ddr_d  = (unsigned char*) 0x2A; 
 volatile unsigned char* pin_d  = (unsigned char*) 0x29;
 
-// ADC Direct Register Access
+//Move vent left(Digital pin 44, PL5)
+//Move vent right(Digital pin 46, PL3)
+
+//Water Level Sensor (Analog pin 0, A0)
+const int waterLevel = 0;
+
+//  -Temp/Humidity-
+dht DHT;
+#define DHT11_PIN 22
+
+// --LCD Pins--
+const int RS = 4, EN = 5, D4 = 6, D5 = 7, D6 = 8, D7 = 9;
+LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
+
+//My Delay Params
+volatile unsigned char *myTCCR1A = (unsigned char *) 0x80;
+volatile unsigned char *myTCCR1B = (unsigned char *) 0x81;
+volatile unsigned char *myTCCR1C = (unsigned char *) 0x82;
+volatile unsigned char *myTIMSK1 = (unsigned char *) 0x6F;
+volatile unsigned int  *myTCNT1  = (unsigned  int *) 0x84;
+volatile unsigned char *myTIFR1 =  (unsigned char *) 0x36;
+
+//Serial Params
+ #define RDA 0x80
+ #define TBE 0x20  
+ volatile unsigned char *myUCSR0A = (unsigned char *)0x00C0;
+ volatile unsigned char *myUCSR0B = (unsigned char *)0x00C1;
+ volatile unsigned char *myUCSR0C = (unsigned char *)0x00C2;
+ volatile unsigned int  *myUBRR0  = (unsigned int *) 0x00C4;
+ volatile unsigned char *myUDR0   = (unsigned char *)0x00C6;
+
+ //ADC Params
 volatile unsigned char* my_ADMUX = (unsigned char*) 0x7C;
 volatile unsigned char* my_ADCSRB = (unsigned char*) 0x7B;
 volatile unsigned char* my_ADCSRA = (unsigned char*) 0x7A;
 volatile unsigned int* my_ADC_DATA = (unsigned int*) 0x78;
 
-// Serial Direct Register Access
-#define RDA 0x80
-#define TBE 0x20
-volatile unsigned char* myUCSR0A = (unsigned char*) 0xC0;
-volatile unsigned char* myUCSR0B = (unsigned char*) 0xC1;
-volatile unsigned char* myUCSR0C = (unsigned char*) 0xC2;
-volatile unsigned int* myUBRR0 = (unsigned int*) 0xC4;
-volatile unsigned char* myUDR0 = (unsigned char*) 0xC6;
+//Start States
+String state = "disabled";
+String previousState = "disabled";
 
-// State & Flags
-String state = "disabled", previousState = "disabled";
-volatile bool startPushed = false;
-unsigned long lastUpdate = 0;
+//1 min delay setup
+unsigned long previousMillis = 0;
 const long interval = 60000;
-unsigned long lastLog = 0;
 
-// Components
-LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
-dht DHT;
-Stepper ventMotor(2038, 47, 48, 49, 50);
-float temp = 0.0, humidity = 0.0;
+//Starting Temp and Humidity
+float temp = 0.00;
+float humidity = 0.00;
+const float tooHot = 28.00;
 
+//Start Button State
+volatile bool startPushed = false;
+const int interruptPin = 18;
+
+//Event Messages:
 String stateChangeMessage = "The state has changed to: ";
 String ventMoveMessage = "The vent has moved.";
 
 void setup() {
+  //Initialize Serial Port
   U0init(9600);
+  //Initialize ADC
   adc_init();
-
+  //Set all LEDs to Output Mode
   *ddr_b |= 0b11110000;
-  *ddr_l |= (1 << 6);
-  *ddr_l &= ~((1 << 3) | (1 << 5));
-  *ddr_e &= ~((1 << 4) | (1 << 5));
-  *ddr_d &= ~(1 << 3);
-  *port_d |= (1 << 3);
-
-  attachInterrupt(digitalPinToInterrupt(18), startUpISR, RISING);
+  //Set all Buttons as Inputs
+  *ddr_l &= 0b11010111;
+  *ddr_e &= 0b11001111;
+  *ddr_d &= 0b11110111;
+  *port_d |= 0b11110111;
+  //Set up LCD
   lcd.begin(16, 2);
-  ventMotor.setSpeed(5);
-  DHT.read11(DHT11_PIN);
+  lcd.setCursor(0, 0);
+  //Set Fan Motor pin to Output
+  *ddr_l |= 0b01000000;
+  //Set up AttachInterrupt
+  attachInterrupt(digitalPinToInterrupt(18), startUpISR, RISING);
+  //Set initial Temp and Humidity.
+  int chk = DHT.read(DHT11_PIN);
   temp = DHT.temperature;
   humidity = DHT.humidity;
-  logSystemStart();
+  //Set up vent position.
+  vent.setSpeed(5);
 }
 
 void loop() {
-  if (!startPushed) {
-    *port_b = (1 << 6);
-    *port_l &= ~(1 << 6);
-    lcd.clear();
+  while (!startPushed) {
+    // Disabled Mode
+    *port_b |= 0b01000000; // Yellow LED on, All others off.
+    *port_b &= ~(0x01 << 7);
+    *port_b &= ~(0x01 << 5);
+    *port_b &= ~(0x01 << 4);
+    *port_l &= ~(0x01 << 6); // Make sure fan is off.
+    lcd.clear();             // No LCD display.
     lcd.setCursor(0, 0);
-    lcd.print("System Disabled");
-    return;
   }
 
   tmElements_t tm;
-  DHT.read11(DHT11_PIN);
-  temp = DHT.temperature;
-  humidity = DHT.humidity;
-  if (isStateChange()) printEventMessage(state, tm, stateChangeMessage);
-  if (isTimeToUpdate()) printTempToLCD();
+  printTempAndHumidityToLcd();
 
-  if (millis() - lastLog > 30000) {
-    logLiveData();
-    lastLog = millis();
+  if (isStateChange()) {
+    printEventMessage(state, tm, stateChangeMessage);
   }
 
   if (state == "idle") {
-    setLEDs(1, 0, 0, 0);
-    *port_l &= ~(1 << 6);
-    if (temp >= 28.0) state = "run";
-    else if (!(*pin_e & (1 << 5))) { state = "disabled"; startPushed = false; printEventMessage(state, tm, stateChangeMessage); }
+    *port_b |= 0b10000000;
+    *port_b &= ~(0x01 << 6);
+    *port_b &= ~(0x01 << 5);
+    *port_b &= ~(0x01 << 4);
+
+    *port_l &= ~(0x01 << 6);
+
+    if (temp >= tooHot) {
+      state = "run";
+    }
+    // Stop from Idle
+    else if (*pin_e & 0b00100000) {
+      state = "disabled";
+      printEventMessage(state, tm, stateChangeMessage);
+      previousState = state;
+      startPushed = false;
+    }
+  } else if (state == "run") {
+    *port_b |= 0b00010000;
+    *port_b &= ~(0x01 << 6);
+    *port_b &= ~(0x01 << 5);
+    *port_b &= ~(0x01 << 7);
+
+    *port_l |= 0b01000000;
+
+    if (temp < tooHot) {
+      state = "idle";
+    }
+    // Stop from Run
+    else if (*pin_e & 0b00100000) {
+      startPushed = false;
+      state = "disabled";
+      printEventMessage(state, tm, stateChangeMessage);
+      previousState = state;
+    }
+  } else if (state == "error") {
+    *port_b |= 0b00100000;
+    *port_b &= ~(0x01 << 6);
+    *port_b &= ~(0x01 << 4);
+    *port_b &= ~(0x01 << 7);
+
+    *port_l &= ~(0x01 << 6); // Make sure fan is off.
+    printErrorToLcd();
+    // Stop from Error
+    if (!isWaterLow() && (*pin_e & 0b00100000)) {
+      startPushed = false;
+      state = "disabled";
+      printEventMessage(state, tm, stateChangeMessage);
+      previousState = state;
+    }
+    // Reset from Error
+    else if (!isWaterLow() && (*pin_e & 0b00010000)) {
+      state = "idle";
+    }
   }
-  else if (state == "run") {
-    setLEDs(0, 0, 0, 1);
-    *port_l |= (1 << 6);
-    if (temp < 28.0) state = "idle";
-    else if (!(*pin_e & (1 << 5))) { state = "disabled"; startPushed = false; printEventMessage(state, tm, stateChangeMessage); }
-  }
-  else if (state == "error") {
-    setLEDs(0, 0, 1, 0);
-    *port_l &= ~(1 << 6);
-    lcd.clear(); lcd.print("Water Level Low!");
-    if (!isWaterLow() && (*pin_e & (1 << 4))) state = "idle";
-    else if (!isWaterLow() && (*pin_e & (1 << 5))) { state = "disabled"; startPushed = false; printEventMessage(state, tm, stateChangeMessage); }
+
+  if (isMoveVent()) {
+    printEventMessage(state, tm, ventMoveMessage);
   }
 
-  if (isWaterLow()) state = "error";
-  if (isMoveVent()) printEventMessage(state, tm, ventMoveMessage);
+  if (isWaterLow()) {
+    state = "error";
+  }
+
+  if (isTimeToUpdate()) {
+    updateTempAndHumidity();
+  }
 }
 
-void U0init(unsigned long baud) {
-  unsigned long FCPU = 16000000;
-  unsigned int tbaud = (FCPU / 16 / baud - 1);
-  *myUCSR0A = 0x20; *myUCSR0B = 0x18; *myUCSR0C = 0x06; *myUBRR0 = tbaud;
+//Delay Function
+void my_delay(unsigned int ticks)
+{
+  *myTCCR1B &= 0xF8;
+  *myTCNT1 = (unsigned int) (65536 - ticks);
+  * myTCCR1A = 0x0;
+  * myTCCR1B |= 0b00000001;
+  while((*myTIFR1 & 0x01)==0);
+  *myTCCR1B &= 0xF8;
+  *myTIFR1 |= 0x01;
 }
 
-void U0putchar(unsigned char c) {
-  while (!(*myUCSR0A & TBE));
-  *myUDR0 = c;
+//Serial Functions
+void U0init(unsigned long U0baud)
+{
+ unsigned long FCPU = 16000000;
+ unsigned int tbaud;
+ tbaud = (FCPU / 16 / U0baud - 1);
+ *myUCSR0A = 0x20;
+ *myUCSR0B = 0x18;
+ *myUCSR0C = 0x06;
+ *myUBRR0  = tbaud;
+}
+unsigned char U0kbhit()
+{
+  return (*myUCSR0A & RDA);
 }
 
-void adc_init() {
-  *my_ADCSRA = 0x87;
-  *my_ADCSRB = 0;
-  *my_ADMUX = 0x40;
+char U0getchar()
+{
+  unsigned char ch;
+  ch = *myUDR0;
+  return ch;
 }
 
-unsigned int adc_read(unsigned char ch) {
-  *my_ADMUX = (*my_ADMUX & 0xF0) | (ch & 0x0F);
+void U0putchar(unsigned char U0pdata)
+{
+  while(!(*myUCSR0A & TBE));
+  *myUDR0 = U0pdata;
+}
+
+//ADC Functions
+void adc_init()
+{
+  // setup the A register
+  *my_ADCSRA |= 0b10000000; 
+  *my_ADCSRA &= 0b11011111; 
+  *my_ADCSRA &= 0b11110111; 
+  *my_ADCSRA &= 0b11111000; 
+  // setup the B register
+  *my_ADCSRB &= 0b11110111; 
+  *my_ADCSRB &= 0b11111000; 
+  // setup the MUX Register
+  *my_ADMUX  &= 0b01111111; 
+  *my_ADMUX  |= 0b01000000; 
+  *my_ADMUX  &= 0b11011111; 
+  *my_ADMUX  &= 0b11100000; 
+}
+
+unsigned int adc_read(unsigned char adc_channel_num)
+{
+  *my_ADMUX  &= 0b11100000;
+  *my_ADCSRB &= 0b11110111;
+  if(adc_channel_num > 7)
+  {
+    adc_channel_num -= 8;
+    *my_ADCSRB |= 0b00001000;
+  }
+  *my_ADMUX  += adc_channel_num;
   *my_ADCSRA |= 0x40;
-  while (*my_ADCSRA & 0x40);
+  while((*my_ADCSRA & 0x40) != 0);
   return *my_ADC_DATA;
 }
 
-bool isWaterLow() { return adc_read(0) < 100; }
+//Helper Functions
+void printTempAndHumidityToLcd(){
+  int chk = DHT.read11(DHT11_PIN);
+  lcd.clear();
+  lcd.setCursor(0,0); 
+  lcd.print("Temp: ");
+  lcd.print(DHT.temperature);
+  lcd.print((char)223);
+  lcd.print("C");
+  lcd.setCursor(0,1);
+  lcd.print("Humidity: ");
+  lcd.print(DHT.humidity);
+  lcd.print("%");
+}
 
-bool isTimeToUpdate() {
-  if (millis() - lastUpdate >= interval) {
-    lastUpdate = millis();
+void updateTempAndHumidity(){
+  temp = DHT.temperature;
+  humidity = DHT.humidity;
+}
+
+bool isMoveVent(){
+  if(*pin_l & (0x01 << 3)){
+    vent.step(500);
+    return true;
+  }else if(*pin_l & 0x01 << 5){
+    vent.step(-500);
+    return true;
+  }else{
+    return false;
+  }
+}
+
+bool isWaterLow(){
+  if(adc_read(0) < 100){
     return true;
   }
   return false;
 }
 
-bool isStateChange() {
-  if (state != previousState) { previousState = state; return true; }
-  return false;
-}
-
-bool isMoveVent() {
-  if (*pin_l & (1 << 3)) { ventMotor.step(500); return true; }
-  if (*pin_l & (1 << 5)) { ventMotor.step(-500); return true; }
-  return false;
-}
-
-void printTempToLCD() {
+void printErrorToLcd(){
   lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Temp: "); lcd.print(temp); lcd.print("C");
-  lcd.setCursor(0, 1);
-  lcd.print("Humidity: "); lcd.print(humidity); lcd.print("%");
+  lcd.setCursor(0,0);
+  lcd.print("Water Level Low!");
 }
 
-void printEventMessage(String newState, tmElements_t tm, String eventMessage) {
+bool isTimeToUpdate(){
+  int currMillis = millis();
+  if(currMillis - previousMillis >= interval){
+    previousMillis = currMillis;
+    return true;
+  }else{
+    return false;
+  }
+}
+
+void startUpISR(){
+  startPushed = true;
+  state = "idle";
+}
+
+void printEventMessage(String newState, tmElements_t tm, String eventMessage){
   RTC.read(tm);
-  String ts = String(tm.Hour) + ":" + String(tm.Minute) + ":" + String(tm.Second) + " " + String(tm.Month) + "/" + String(tm.Day) + "/" + String(tmYearToCalendar(tm.Year)) + " ";
-  for (char c : ts + eventMessage + (eventMessage == stateChangeMessage ? newState : "")) U0putchar(c);
+  String hour = String(tm.Hour);
+  String minutes = String(tm.Minute);
+  String seconds = String(tm.Second);
+  String day = String(tm.Day);
+  String month = String(tm.Month);
+  String year = String(tmYearToCalendar(tm.Year));
+
+  //Print the hour
+  for(int i = 0; i < hour.length(); i++){
+    U0putchar(hour[i]);
+  }
+  U0putchar(':');
+  //Print Minutes
+  for(int i = 0; i < minutes.length(); i++){
+    U0putchar(minutes[i]);
+  }
+  U0putchar(':');
+  //Print Seconds
+  for(int i = 0; i < seconds.length(); i++){
+    U0putchar(seconds[i]);
+  }
+  U0putchar(' ');
+  //Print Month
+  for(int i = 0; i < month.length(); i++){
+    U0putchar(month[i]);
+  }
+  U0putchar('/');
+  //Print Day
+  for(int i = 0; i < day.length(); i++){
+    U0putchar(day[i]);
+  }
+  U0putchar('/');
+  //Print Year
+  for(int i = 0; i < year.length(); i++){
+    U0putchar(year[i]);
+  }
+  U0putchar(' ');
+  //Print Event Message
+  for(int i = 0; i < eventMessage.length(); i++){
+    U0putchar(eventMessage[i]);
+  }
+  if(eventMessage == stateChangeMessage){
+    for(int i = 0; i < newState.length(); i++){
+      U0putchar(newState[i]);
+    }
+  }
+  //New Line
   U0putchar('\n');
 }
 
-void logSystemStart() {
-  tmElements_t tm;
-  RTC.read(tm);
-  String msg = "System Start Time: " + String(tm.Hour) + ":" + String(tm.Minute) + ":" + String(tm.Second) + " on " + String(tm.Month) + "/" + String(tm.Day) + "/" + String(tmYearToCalendar(tm.Year));
-  for (char c : msg) U0putchar(c);
-  U0putchar('\n');
+bool isStateChange(){
+  if(state != previousState){
+    previousState = state;
+    return true;
+  }
+  return false;
 }
-
-void logLiveData() {
-  String msg = "[Live] Temp: " + String(temp) + "C, Humidity: " + String(humidity) + "%, Water: " + String(adc_read(0));
-  for (char c : msg) U0putchar(c);
-  U0putchar('\n');
-}
-
-void setLEDs(bool g, bool y, bool r, bool b) {
-  *port_b = (g << 7) | (y << 6) | (r << 5) | (b << 4);
-}
-
-void startUpISR() { startPushed = true; state = "idle"; }
