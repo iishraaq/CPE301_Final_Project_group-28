@@ -1,0 +1,208 @@
+// CPE 301 Final Project - COMPLIANT VERSION
+// Team Members: Ishraqul Islam, Peter Pickard
+
+#include <LiquidCrystal.h>
+#include <dht.h>
+#include <Wire.h>
+#include <TimeLib.h>
+#include <DS1307RTC.h>
+#include <Stepper.h>
+
+// ---- Pin Setup ----
+#define DHT11_PIN 40
+#define RS 41
+#define EN 42
+#define D4 43
+#define D5 44
+#define D6 45
+#define D7 46
+
+// LED, Fan, Button, Motor and ADC Setup
+volatile unsigned char* port_b = (unsigned char*) 0x25; // PORTB - LEDs
+volatile unsigned char* ddr_b  = (unsigned char*) 0x24;
+volatile unsigned char* port_l = (unsigned char*) 0x10B; // PORTL - Fan & Buttons
+volatile unsigned char* ddr_l  = (unsigned char*) 0x10A;
+volatile unsigned char* pin_l  = (unsigned char*) 0x109;
+volatile unsigned char* port_e = (unsigned char*) 0x2E; // PORTE - Stop/Reset
+volatile unsigned char* ddr_e  = (unsigned char*) 0x2D;
+volatile unsigned char* pin_e  = (unsigned char*) 0x2C;
+volatile unsigned char* port_d = (unsigned char*) 0x2B; // PORTD - Start
+volatile unsigned char* ddr_d  = (unsigned char*) 0x2A;
+volatile unsigned char* pin_d  = (unsigned char*) 0x29;
+
+// ADC Direct Register Access
+volatile unsigned char* my_ADMUX = (unsigned char*) 0x7C;
+volatile unsigned char* my_ADCSRB = (unsigned char*) 0x7B;
+volatile unsigned char* my_ADCSRA = (unsigned char*) 0x7A;
+volatile unsigned int* my_ADC_DATA = (unsigned int*) 0x78;
+
+// Serial Direct Register Access
+#define RDA 0x80
+#define TBE 0x20
+volatile unsigned char* myUCSR0A = (unsigned char*) 0xC0;
+volatile unsigned char* myUCSR0B = (unsigned char*) 0xC1;
+volatile unsigned char* myUCSR0C = (unsigned char*) 0xC2;
+volatile unsigned int* myUBRR0 = (unsigned int*) 0xC4;
+volatile unsigned char* myUDR0 = (unsigned char*) 0xC6;
+
+// State & Flags
+String state = "disabled", previousState = "disabled";
+volatile bool startPushed = false;
+unsigned long lastUpdate = 0;
+const long interval = 60000;
+unsigned long lastLog = 0;
+
+// Components
+LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
+dht DHT;
+Stepper ventMotor(2038, 47, 48, 49, 50);
+float temp = 0.0, humidity = 0.0;
+
+String stateChangeMessage = "The state has changed to: ";
+String ventMoveMessage = "The vent has moved.";
+
+void setup() {
+  U0init(9600);
+  adc_init();
+
+  *ddr_b |= 0b11110000;
+  *ddr_l |= (1 << 6);
+  *ddr_l &= ~((1 << 3) | (1 << 5));
+  *ddr_e &= ~((1 << 4) | (1 << 5));
+  *ddr_d &= ~(1 << 3);
+  *port_d |= (1 << 3);
+
+  attachInterrupt(digitalPinToInterrupt(18), startUpISR, RISING);
+  lcd.begin(16, 2);
+  ventMotor.setSpeed(5);
+  DHT.read11(DHT11_PIN);
+  temp = DHT.temperature;
+  humidity = DHT.humidity;
+  logSystemStart();
+}
+
+void loop() {
+  if (!startPushed) {
+    *port_b = (1 << 6);
+    *port_l &= ~(1 << 6);
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("System Disabled");
+    return;
+  }
+
+  tmElements_t tm;
+  DHT.read11(DHT11_PIN);
+  temp = DHT.temperature;
+  humidity = DHT.humidity;
+  if (isStateChange()) printEventMessage(state, tm, stateChangeMessage);
+  if (isTimeToUpdate()) printTempToLCD();
+
+  if (millis() - lastLog > 30000) {
+    logLiveData();
+    lastLog = millis();
+  }
+
+  if (state == "idle") {
+    setLEDs(1, 0, 0, 0);
+    *port_l &= ~(1 << 6);
+    if (temp >= 28.0) state = "run";
+    else if (!(*pin_e & (1 << 5))) { state = "disabled"; startPushed = false; printEventMessage(state, tm, stateChangeMessage); }
+  }
+  else if (state == "run") {
+    setLEDs(0, 0, 0, 1);
+    *port_l |= (1 << 6);
+    if (temp < 28.0) state = "idle";
+    else if (!(*pin_e & (1 << 5))) { state = "disabled"; startPushed = false; printEventMessage(state, tm, stateChangeMessage); }
+  }
+  else if (state == "error") {
+    setLEDs(0, 0, 1, 0);
+    *port_l &= ~(1 << 6);
+    lcd.clear(); lcd.print("Water Level Low!");
+    if (!isWaterLow() && (*pin_e & (1 << 4))) state = "idle";
+    else if (!isWaterLow() && (*pin_e & (1 << 5))) { state = "disabled"; startPushed = false; printEventMessage(state, tm, stateChangeMessage); }
+  }
+
+  if (isWaterLow()) state = "error";
+  if (isMoveVent()) printEventMessage(state, tm, ventMoveMessage);
+}
+
+void U0init(unsigned long baud) {
+  unsigned long FCPU = 16000000;
+  unsigned int tbaud = (FCPU / 16 / baud - 1);
+  *myUCSR0A = 0x20; *myUCSR0B = 0x18; *myUCSR0C = 0x06; *myUBRR0 = tbaud;
+}
+
+void U0putchar(unsigned char c) {
+  while (!(*myUCSR0A & TBE));
+  *myUDR0 = c;
+}
+
+void adc_init() {
+  *my_ADCSRA = 0x87;
+  *my_ADCSRB = 0;
+  *my_ADMUX = 0x40;
+}
+
+unsigned int adc_read(unsigned char ch) {
+  *my_ADMUX = (*my_ADMUX & 0xF0) | (ch & 0x0F);
+  *my_ADCSRA |= 0x40;
+  while (*my_ADCSRA & 0x40);
+  return *my_ADC_DATA;
+}
+
+bool isWaterLow() { return adc_read(0) < 100; }
+
+bool isTimeToUpdate() {
+  if (millis() - lastUpdate >= interval) {
+    lastUpdate = millis();
+    return true;
+  }
+  return false;
+}
+
+bool isStateChange() {
+  if (state != previousState) { previousState = state; return true; }
+  return false;
+}
+
+bool isMoveVent() {
+  if (*pin_l & (1 << 3)) { ventMotor.step(500); return true; }
+  if (*pin_l & (1 << 5)) { ventMotor.step(-500); return true; }
+  return false;
+}
+
+void printTempToLCD() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Temp: "); lcd.print(temp); lcd.print("C");
+  lcd.setCursor(0, 1);
+  lcd.print("Humidity: "); lcd.print(humidity); lcd.print("%");
+}
+
+void printEventMessage(String newState, tmElements_t tm, String eventMessage) {
+  RTC.read(tm);
+  String ts = String(tm.Hour) + ":" + String(tm.Minute) + ":" + String(tm.Second) + " " + String(tm.Month) + "/" + String(tm.Day) + "/" + String(tmYearToCalendar(tm.Year)) + " ";
+  for (char c : ts + eventMessage + (eventMessage == stateChangeMessage ? newState : "")) U0putchar(c);
+  U0putchar('\n');
+}
+
+void logSystemStart() {
+  tmElements_t tm;
+  RTC.read(tm);
+  String msg = "System Start Time: " + String(tm.Hour) + ":" + String(tm.Minute) + ":" + String(tm.Second) + " on " + String(tm.Month) + "/" + String(tm.Day) + "/" + String(tmYearToCalendar(tm.Year));
+  for (char c : msg) U0putchar(c);
+  U0putchar('\n');
+}
+
+void logLiveData() {
+  String msg = "[Live] Temp: " + String(temp) + "C, Humidity: " + String(humidity) + "%, Water: " + String(adc_read(0));
+  for (char c : msg) U0putchar(c);
+  U0putchar('\n');
+}
+
+void setLEDs(bool g, bool y, bool r, bool b) {
+  *port_b = (g << 7) | (y << 6) | (r << 5) | (b << 4);
+}
+
+void startUpISR() { startPushed = true; state = "idle"; }
