@@ -25,5 +25,5 @@ Peter Pickard
 - LEDs, buttons, resistors, breadboard
 
 ## 📷 Demo
-there is a demo video
-
+https://www.youtube.com/watch?v=YEBWanJQBtY 
+This video demonstrates the function of our final project 
